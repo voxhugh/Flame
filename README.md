@@ -1,6 +1,6 @@
 <h1 align='center'><span style="color: orange">装机配置 </span></h1>
 
-| 硬件 |                    型号                    |   品牌   | 价格 |
+| 硬&nbsp;&nbsp;件 |                    型号                    |   品牌   | 价格 |
 | :--: | :----------------------------------------: | :------: | :--: |
 | 显卡 |            RTX 5080 Ultra W OC             |  七彩虹  | 8900 |
 | CPU  |             AMD Ryzen 7 9700X              |   AMD    | 1700 |

@@ -9,9 +9,10 @@
 | 固态 |            致钛 TiPlus7100 2TB             |   致钛   | 908  |
 | 主板 |        微星 B850M GAMING PLUS WIFI         |   微星   | 1400 |
 | 机箱 |          联力 包豪斯 O11D Mini V2          |   联力   | 580  |
-| 散热 | 乔思伯 CR-3000E ARGB 版（白色款） |   乔思伯   | 132 |
+| 散热 | 九州风神 大霜塔棱镜 白色 |   九州风神   | 192 |
 | 外显 |             泰坦军团 P275MV-A              | 泰坦军团 | 1060 |
+| 风扇 | 棱镜 4Pro 白镜 ARGB(×9) | 玄冰风 | 122 |
 
 ---
 
-<img src="https://github.com/voxhugh/Appendix/blob/main/Misc/PC-config.png" style="zoom: 25%;" />
+<img src="https://github.com/voxhugh/Appendix/blob/main/Misc/PC-config.png" style="zoom: 40%;" />

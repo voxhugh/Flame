@@ -59,7 +59,26 @@
 ```c
 驱动人生
 uninstall
+autohideDesktopIcons
+musicTag
+ce
 scripts: theme, winupdate, hover
-autohideDesktopIcons, musicTag, ce
+```
+
+```rust
+.
+├── C
+│   ├── Apps
+│   ├── Dev
+│   ├── Files
+│   │   ├── Baidu
+│   │   ├── QQ
+│   │   ├── WeChat
+│   │   ├── book
+│   │   └── material
+│   ├── Scripts
+│   └── Tools
+└── D
+    └── Steam
 ```
 

@@ -17,4 +17,4 @@
 
 ---
 
-<img src="https://github.com/voxhugh/Appendix/blob/main/Misc/PC-config.png" style="zoom: 40%;" />
+<img src="images/PC-config.png" style="zoom:40%;" />

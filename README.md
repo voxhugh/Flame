@@ -1,204 +1,246 @@
-## ③ Qt 
+## 面试
 
-## 1. 信号与槽
 
-**一句话本质：** Qt 的观察者模式实现，通过元对象系统在运行时动态绑定信号和槽。
 
-**必须能写出来的关键词：**
+### 问题总结
 
-- `Q_OBJECT` 宏是开启信号槽的前提，moc 预处理器会解析这个宏并生成元对象代码
-- `connect(sender, SIGNAL(xxx()), receiver, SLOT(yyy()))` 建立连接
-- 新式写法：`connect(sender, &Sender::signal, receiver, &Receiver::slot)`，编译期类型检查
-- 一个信号可以连多个槽，一个槽可以被多个信号连接
-- 连接类型：
-  - `Qt::DirectConnection`：直接调用，同线程默认
-  - `Qt::QueuedConnection`：投递到接收者的事件队列，跨线程默认
-  - `Qt::AutoConnection`：自动判断，同线程直连，跨线程队列
-- **底层原理：** 元对象系统为每个信号和槽分配索引，connect 时建立映射表，emit 信号时查表调用对应槽函数。跨线程队列连接本质是向目标线程的事件队列投递一个 `QMetaCallEvent`。
+我把这一年的问题归成四类：内存对象、编译器优化、类型系统、编码逻辑。
 
-**简答题模板：**
+后来发现偶发崩溃大多数都命中了，所以总结了一套排查流程。
 
-> 信号槽是 Qt 的核心通信机制，本质是观察者模式。通过 moc 预处理生成元对象代码，为信号和槽建立索引映射。同线程发射信号直接调用槽函数，跨线程则通过事件队列投递，保证线程安全。相比回调函数，信号槽更灵活，支持一对多、多对一连接，且是类型安全的。
+  Step 1: **控制变量**，先把问题压到最小复现案例，确认是哪个函数直接失败
 
-## 2. 事件循环
+  Step 2: **数据完整性**，比如 CheckSum 是否正确，这能帮我判断问题出在数据本身，还是后续处理（一致性问题）
 
-**一句话本质：** Qt 程序的主线程不断从事件队列取事件并分发给对应对象处理。
+  Step 3: **静态粗查**，先看有没有明显的逻辑错误、类型宽度问题、TODO、double free 这类常见坑
 
-**关键点：**
+  Step 4: **动态调试**，如果崩溃，我用 GDB 抓第一现场，重点看空指针、越界、寄存器错位；如果不崩溃，就回到静态细查，配合日志输出，根据 CheckSum 错误阶段慢慢收敛
 
-- `QApplication::exec()` 启动主事件循环，阻塞直到 `quit()` 被调用
-- 事件来源：用户输入（鼠标、键盘）、定时器、跨线程信号槽投递、网络事件、自定义事件
-- `QEventLoop` 可以创建局部事件循环，实现嵌套
-- 事件循环是 Qt 非阻塞异步模型的基础
 
-**底层类比：** 类似 Windows 消息循环 `GetMessage/DispatchMessage`，也类似 Linux 的 epoll 循环。
 
-## 3. 对象树与内存管理
+### 三个经典问题
 
-**一句话本质：** QObject 通过父子关系自动管理子对象生命周期。
+1. *符号扩展*
 
-**关键点：**
+两个层次，简单的是同宽度有无符号比较，有符号是负数时，隐式转换带来的逻辑求补；
 
-- 创建 QObject 时指定 parent，该对象会被加入 parent 的 children 列表
-- parent 析构时，自动 delete 所有 children
-- 注意事项：手动 new 的对象如果没指定 parent，需要手动 delete 或用智能指针包裹
-- 析构顺序：先子后父，确保子对象析构时父对象仍有效
+当宽度不同时，比如 `int` 和 `int64_t` 比较，64位可能是拼接或无符号转储而来，`int` 是负数时隐式提升会带来高 32 位全是1。
 
-**底层类比：** 类似 `shared_ptr` 的 ownership 模型，但方向相反——parent 拥有 child。
+我是看的汇编。应该是 `ja` 的但代码里生成的是 `jg`，说明编译器当有符号比较了。打印了高 32 位的数据，确认全 1 就锁定了。
 
-## 4. Model/View 架构
+2. *寄存器错位*
 
-**一句话本质：** 数据（Model）与显示（View）分离，通过 Delegate 定制渲染和编辑。
+也是两种情况，第一种是 `this` 没有被用到。按照 ABI，成员函数的 `this` 放在 `rdi`。但编译器发现没用到，可能把原本 `rsi` 的参数塞进 `rdi`。优化本身合法，但如果调用方和被调用方的编译假设不一致，就会崩；
 
-**关键点：**
+第二种，当非引用函数返回值超过 128 位时，ABI 规定 `rdi` 用来存返回对象的地址，`rsi` 放 `this`，如果碰到多继承的 thunk 调整，寄存器分配很复杂，做逆向时这种错位经常遇到 ABI 层的问题，先确认根因，再把影响面评估清楚，然后和主管一起决定修法。因为寄存器行为可能波及其他模块
 
-- `QAbstractItemModel`：数据接口，提供 `data()`、`rowCount()`、`columnCount()` 等
-- `QAbstractItemView`：显示组件，如 `QTableView`、`QListView`、`QTreeView`
-- `QAbstractItemDelegate`：负责单元格绘制和编辑控件
-- 优势：一份数据可以被多个 View 以不同方式展示，数据变化自动通知所有 View 更新
+3. *标签指针*
 
-## 5. QThread 与 Qt 并发
+标签指针我做过一个类型复用的优化。简单说就是把 `T*` 和一个 `std::set<T>*` 复用同一个指针，用低 3 位做标记。
 
-**两种用法：**
+使用前先看低 3 位。如果全是 0，那就是普通的 `T*`，直接走正常逻辑。如果有标记，就先 `& 0xFFFFFFFFFFFFFFF8` 把低 3 位清掉，再按 `std::set<T>*` 去用。
 
-1. 继承 QThread，重写 `run()` 方法
-2. 创建 QThread，将工作对象用 `moveToThread()` 移到该线程
+这个方案在64位平台是成立的，性能较好。缺点是类型系统被破坏，需要手动解析，后来有一个 bug 就是因为 `std::hash<Ptr>` 的会 `>> 3` 导致标记判断失效出错，所以如果再让我选，我会把这种优化技巧限制在极小的局部，有扩散行为的不要去用。
 
-**QtConcurrent：**
 
-- `QtConcurrent::run()`：在线程池中异步执行函数
-- 返回 `QFuture<T>`，通过 `waitForFinished()` 或 `QFutureWatcher` 获取结果
 
-**线程安全规则：**
+### 修复的回归性证明
 
-- UI 操作只能在主线程执行
-- 跨线程信号槽默认使用队列连接，确保槽在目标线程执行
-- 共享数据用 `QMutex`、`QReadWriteLock` 保护
+  以符号扩展为例，我追到根上是一个成员变量被错声明成了 64 位。查了所有用到它的地方，布局、布线、timing 的汇编都只取低 32 位。所以我把变量类型从源头拆开，回归全过才提交。后来凡看到这种高低位取用，我先怀疑根类型错了。
 
-**简答题模板：**
 
-> Qt 多线程编程核心原则是 UI 只能在主线程操作。子线程执行耗时任务，通过信号槽把结果传回主线程更新界面。跨线程信号槽默认队列连接，事件循环负责投递，天然线程安全。QThread 可以继承重写 run 或使用 moveToThread，QtConcurrent 提供更高层的线程池接口。
 
-## 6. 常用 Widget（选择/填空题可能考）
+## 笔试
 
-| Widget         | 用途                                                    |
-| -------------- | ------------------------------------------------------- |
-| `QWidget`      | 所有可视化控件的基类                                    |
-| `QMainWindow`  | 主窗口，含菜单栏、工具栏、状态栏、中心区域              |
-| `QDialog`      | 对话框基类，模态/非模态                                 |
-| `QLabel`       | 显示文本或图片                                          |
-| `QPushButton`  | 按钮                                                    |
-| `QLineEdit`    | 单行文本输入框                                          |
-| `QTextEdit`    | 多行富文本编辑器                                        |
-| `QComboBox`    | 下拉选择框                                              |
-| `QCheckBox`    | 复选框                                                  |
-| `QRadioButton` | 单选按钮                                                |
-| `QTableView`   | 表格视图（配合 Model 使用）                             |
-| `QLayout`      | 布局管理器：`QVBoxLayout`、`QHBoxLayout`、`QGridLayout` |
+### 1. *RingBuffer
 
-## 7. 元对象系统（moc）
+> 环形缓冲区，低延时、无锁、固定大小。
 
-**必须知道：**
+写时判断 `free_space >= len`，从 `tail_` 开始写，`tail_ = (tail_ + len) % capacity_`，更新 `size_`。读同理。
 
-- 只有继承 `QObject` 且包含 `Q_OBJECT` 宏的类才支持信号槽
-- moc（Meta-Object Compiler）是一个预处理工具，扫描头文件中的 `Q_OBJECT`，生成包含信号槽注册、类型信息、属性系统的 C++ 代码
-- 生成的元对象代码包含：类名、父类、信号列表、槽列表、属性列表
-- `qmake` 或 `CMake` 会自动调用 moc
+**Q**: 为什么用环形缓冲区？
+
+**A**: 因为数据采集是连续的，缓冲区满了可以选择覆盖旧数据（实时系统常见策略），保证新数据不被阻塞。
+
+```cpp
+class Ring {
+    vector<char> buf;
+    size_t head = 0, tail = 0, cnt = 0, cap;
+public:
+    Ring(size_t n) : buf(n), cap(n) {}
+
+    bool write(const char* p, size_t len) {
+        if (len > cap - cnt) return false;
+        size_t first = min(len, cap - tail);
+        memcpy(buf.data() + tail, p, first);
+        memcpy(buf.data(), p + first, len - first);
+        tail = (tail + len) % cap;
+        cnt += len;
+        return true;
+    }
+
+    bool read(char* out, size_t len) {
+        if (len > cnt) return false;
+        size_t first = min(len, cap - head);
+        memcpy(out, buf.data() + head, first);
+        memcpy(out + first, buf.data(), len - first);
+        head = (head + len) % cap;
+        cnt -= len;
+        return true;
+    }
+};
+```
 
 ---
 
-# ② 并发核心
+### 2. *Singleton
 
-## 1. 原子操作与内存序（你熟，扫一眼）
+> 线程安全单例，用于全局配置、共享资源管理。
 
-- `std::atomic<T>` 保证读写原子性，避免数据竞争
-- 内存序级别：`seq_cst`（默认，全局顺序）、`acquire`（获取，后续操作不重排到前面）、`release`（释放，前面操作不重排到后面）、`relaxed`（只保证原子性）
-- 典型场景：无锁计数器、自旋锁、无锁队列
+函数内局部静态变量初始化线程安全，编译器会插入类似 `__cxa_guard_acquire` 的同步代码，保证只有一个线程执行初始化。
 
-## 2. 互斥锁与条件变量
+**Q**: 不用局部静态变量，怎么写？
 
-- `std::mutex` + `std::unique_lock` + `std::condition_variable`
-- 生产者消费者模式：生产者拿到锁后 push，`notify_one()`；消费者 `wait()` 等待，被唤醒后检查条件非空再消费
-- **必须会用 `wait` 的谓词重载：** `cv.wait(lock, []{ return !queue.empty(); })`
-- 死锁四条件：互斥、持有并等待、不可剥夺、循环等待
+**A**: 双检锁 + `std::atomic` + 内存序 `acquire/release`
 
-## 3. future / promise / async
-
-- `std::async(std::launch::async, fn, args...)` 返回 `std::future<T>`
-- `future.get()` 阻塞等待结果，只能调用一次
-- `std::promise<T>` 在线程内设置值，通过 `get_future()` 获取对应 future
-- 典型场景：异步任务执行后主线程获取返回值，避免手动管理线程生命周期
-
-## 4. 线程安全编程原则（笔试题可能出简答）
-
-- 不可变对象天然线程安全
-- 尽量使用局部变量，减少共享
-- 共享数据必须加锁或使用原子类型
-- 锁的粒度越小越好
-- 避免在持有锁时调用外部函数，防止死锁
-- 优先使用 `std::atomic` 而非 `volatile` 做线程间同步
+```cpp
+class Single {
+public:
+    static Single& get() {
+        static Single s;
+        return s;
+    }
+private:
+    Single() = default;
+    Single(const Single&) = delete;
+    Single& operator=(const Single&) = delete;
+};
+```
 
 ---
 
-# ① C++ 核心
+### 3. *BitSet
 
-JD 明确要求：**C++17 标准、STL 底层、面向对象、设计模式、数据结构与算法**。你的笔记应该涵盖大部分，下面按笔试出现频率筛选：
+> 手写 bitset，与Tagged-Pointer异曲同工
 
-## 1. C++17 高频特性（可能出现在选择题/简答）
+```cpp
+class Bits {
+    vector<uint64_t> w;
+    size_t n;
+public:
+    Bits(size_t num) : w((num + 63) / 64), n(num) {}
+    
+    void set(size_t i)   { w[i >> 6] |=  (1ULL << (i & 63)); }
+    void reset(size_t i) { w[i >> 6] &= ~(1ULL << (i & 63)); }
+    bool test(size_t i)  { return w[i >> 6] & (1ULL << (i & 63)); }
+    size_t size()        { return n; }
+};
+```
 
-| 特性               | 用途                   | 示例                             |
-| ------------------ | ---------------------- | -------------------------------- |
-| 结构化绑定         | 拆解 pair/tuple/struct | `auto [a, b] = make_pair(1, 2);` |
-| `if constexpr`     | 编译期分支             | `if constexpr (sizeof(T) > 4)`   |
-| `std::optional`    | 可能无值的返回         | `std::optional<int> find();`     |
-| `std::variant`     | 类型安全联合体         | `std::variant<int, double> v;`   |
-| `std::string_view` | 不拷贝的字符串视图     | 函数参数优化                     |
-| `std::filesystem`  | 文件系统操作           | 路径、遍历目录                   |
+---
 
-## 2. 面向对象与多态（笔试必考）
+### 4. SharedPtr
 
-- **虚函数表机制：** 含虚函数的类有一个 vptr 指向 vtable，vtable 中存放各虚函数地址。子类重写虚函数会替换 vtable 中对应项。通过基类指针调用虚函数时，运行时查表实现动态分派
-- **虚析构函数：** 基类析构必须是 virtual，否则通过基类指针 delete 子类对象时只调用基类析构，导致子类资源泄漏
-- **纯虚函数与抽象类：** `virtual void f() = 0;` 使类成为抽象类，不能实例化
-- **访问控制：** public/protected/private 继承的区别与影响
+**Q1**:  控制块里有什么？
 
-## 3. STL 容器底层（你最强项，快速回忆）
+**A1**: 强引用计数、弱引用计数、删除器、分配器。
 
-| 容器            | 底层结构     | 关键特性                 |
-| --------------- | ------------ | ------------------------ |
-| `vector`        | 连续数组     | 扩容倍增，迭代器可能失效 |
-| `deque`         | 分段连续数组 | 两端插入高效             |
-| `list`          | 双向链表     | 任意位置插入 O(1)        |
-| `map/set`       | 红黑树       | 有序，O(log n)           |
-| `unordered_map` | 哈希表       | 平均 O(1)，无序          |
-| `string`        | 连续字符数组 | SSO 小字符串优化         |
+**Q2**: `make_shared` 为什么高效？
 
-**迭代器失效问题：**
+**A2**: 一次内存分配同时容纳对象和控制块，缓存友好。
 
-- `vector`：`push_back` 可能触发扩容，导致所有迭代器失效；`erase` 使被删元素及其后所有迭代器失效
-- `map/set/unordered_map`：`erase` 只使被删元素迭代器失效
-- `list`：插入不失效，删除只使被删元素迭代器失效
+```cpp
+template <typename T>
+class SP {
+    T* p;
+    size_t* rc;
+public:
+    SP(T* ptr = nullptr) : p(ptr), rc(new size_t(1)) {}
+    
+    SP(const SP& other) : p(other.p), rc(other.rc) { ++(*rc); }
+    
+    ~SP() {
+        if (--(*rc) == 0) { delete p; delete rc; }
+    }
+    
+    T* get() const { return p; }
+    T& operator*() const { return *p; }
+};
+```
 
-## 4. 智能指针（必考）
+---
 
-- `unique_ptr`：独占所有权，不可拷贝，可移动。替代裸指针，零开销
-- `shared_ptr`：引用计数，拷贝时计数 +1，析构时 -1，归零释放。注意循环引用
-- `weak_ptr`：不增加计数，配合 `shared_ptr` 打破循环引用，使用前需 `lock()` 提升
-- `make_shared` 优于 `new shared_ptr`：一次内存分配，缓存友好
+### 5. MemoryPool
 
-## 5. 右值引用与移动语义
+> 内存池，预分配一大块连续内存，用空闲链表管理未使用的块，分配/释放对链表存取，优点O(1) 无碎片
 
-- 右值引用 `T&&` 绑定临时对象
-- 移动构造函数将资源"窃取"过来，原对象置空
-- `std::move` 本质是 `static_cast<T&&>`，不实际移动数据
-- 完美转发 `std::forward<T>` 保留实参的左值/右值属性
+**Q**: 为什么仿真系统需要内存池？
 
-## 6. 设计模式（JD 要求，可能简答）
+**A**: 因为飞行器控制周期可能是 1ms，如果每次 `new/delete` 都去问 OS 要内存，可能触发系统调用和锁竞争，导致周期抖动。内存池把分配变成常数时间。
 
-准备两个能流畅说出来的：
+```cpp
+class Pool {
+    vector<char> mem;
+    size_t block, cap;
+    vector<void*> free_list;
+public:
+    Pool(size_t block_size, size_t count)
+        : mem(block_size * count), block(block_size), cap(count) {
+        for (size_t i = 0; i < count; i++)
+            free_list.push_back(mem.data() + i * block);
+    }
+    
+    void* alloc() {
+        if (free_list.empty()) return nullptr;
+        void* p = free_list.back();
+        free_list.pop_back();
+        return p;
+    }
 
-**单例模式：** 懒汉式（线程安全用局部静态变量），饿汉式。C++11 的局部 static 初始化天然线程安全
+    void free(void* p) {
+        if (!is_valid(p)) return;      // 不在池内或不对齐
+        if (is_in_free(p)) return;     // 重复释放
+        free_list.push_back(p);
+    }
+};
+```
 
-**观察者模式：** 发布-订阅，Qt 信号槽就是典型实现。抽象出 Subject 和 Observer 接口，Subject 维护 Observer 列表，状态变化时通知所有观察者
 
-工厂模式，建造者模式，原型模式
+
+## 附录
+
+| 分类               | 问题                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| 内存和对象生命周期 | double free、delete 虚析构、聚合类值初始化清值、多继承上行转换 |
+| 编译器优化与 UB    | 4路循环展开、符号扩展、编译器优化导致 clone、SSE 位宽、this 没用/大对象返回寄存器错位 |
+| 类型系统陷阱       | CRTP this 多态、标签指针类型错误、lambda 类型擦除、is_same 未闭合分支、指针/引用重载 |
+| 编码逻辑边界       | auto 拷贝乱用、内联比较逻辑错误                              |
+
+CheckSum 问题总结
+
+1. double free
+2. 4路循环展开
+3. delete 触发的虚析构
+4. 多继承中的上行转换
+5. auto 拷贝乱用
+6. 内联比较逻辑错误
+7. 符号扩展
+8. CRTP的this多态
+9. 标签指针类型错误
+10. SSE指令集及位宽
+11. lambda的类型擦除
+12. 聚合类值初始化的清值
+13. is_same未闭合分支
+14. this没用或大对象返回导致的寄存器错位
+15. 指针/引用的重载调用
+16. 编译器优化导致的clone函数
+
+
+排查路径：
+  1. 控制变量，case failed by f() directly
+  2. CheckSum is OK?
+  3. OK: 检查log打印完整性，gdb调试
+  4. nOK: 静态粗查 => 逻辑错误，宽度，TODO，double free, etc.
+  5. nOK: 动态调试 => Crash?
+  6. crash: 空野指针访问，gdb break and watch，arr out of bound, regester mismatch
+  7. ncrash: 静态细查 & 动态调试 & log输出
